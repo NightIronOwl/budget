@@ -185,15 +185,21 @@ function save(){
 function login(){
   const st=Math.random().toString(36).slice(2)+Date.now().toString(36);
   try{sessionStorage.setItem("budget-state",st)}catch(e){}
-  const back=location.origin+location.pathname;
+  let path=location.pathname.replace(/index\.html$/,"");if(!path.endsWith("/"))path+="/";
+  const back=location.origin+path;
   location.href="https://oauth.yandex.ru/authorize?response_type=token&client_id="+encodeURIComponent(CONFIG.CLIENT_ID)+"&redirect_uri="+encodeURIComponent(back)+"&state="+encodeURIComponent(st)+"&force_confirm=no";
 }
+let loginErr="";
 function readLoginReturn(){
-  if(!location.hash.includes("access_token"))return;
-  const p=new URLSearchParams(location.hash.slice(1));
+  const h=location.hash.slice(1)+"&"+location.search.slice(1);
+  if(!/access_token=|error=/.test(h))return;
+  const p=new URLSearchParams(h);
   let st=null;try{st=sessionStorage.getItem("budget-state");sessionStorage.removeItem("budget-state")}catch(e){}
-  history.replaceState(null,"",location.pathname+location.search);
-  if(p.get("access_token")&&st&&p.get("state")===st){token=p.get("access_token");ls.set(TKEY,token);dirty=true;ls.set(DKEY,"1")}
+  history.replaceState(null,"",location.pathname);
+  if(p.get("error")){loginErr="Яндекс не пустил: "+(p.get("error_description")||p.get("error"));return}
+  if(!p.get("access_token")){loginErr="Яндекс не вернул ключ входа";return}
+  if(!st||p.get("state")!==st){loginErr="Вход прерван, попробуйте ещё раз";return}
+  token=p.get("access_token");ls.set(TKEY,token);dirty=true;ls.set(DKEY,"1");
 }
 let confirmOut=false;
 function logout(){
@@ -208,7 +214,7 @@ function status(){
   const st=$("st");
   $("login").hidden=!ONLINE||!!token;$("logout").hidden=!token;
   if(!ONLINE){st.className="st";st.textContent="Записи хранятся только на этом устройстве";return}
-  if(!token){st.className="st warn";st.textContent="Войдите, чтобы записи были на всех ваших устройствах";return}
+  if(!token){st.className="st warn";st.textContent=loginErr||"Войдите, чтобы записи были на всех ваших устройствах";return}
   if(net==="auth"){st.className="st warn";st.textContent="Вход устарел — войдите снова";return}
   if(net==="off"){st.className="st warn";st.textContent="Нет связи — всё сохранено на устройстве, отправлю позже";return}
   if(busy||dirty){st.className="st";st.textContent="Сохраняю…";return}
