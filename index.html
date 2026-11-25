@@ -214,8 +214,9 @@ function status(){
   const st=$("st");
   $("login").hidden=!ONLINE||!!token;$("logout").hidden=!token;
   if(!ONLINE){st.className="st";st.textContent="Записи хранятся только на этом устройстве";return}
+  if(net==="auth"&&!token){st.className="st warn";st.textContent="Сервер не принял вход — войдите снова";return}
   if(!token){st.className="st warn";st.textContent=loginErr||"Войдите, чтобы записи были на всех ваших устройствах";return}
-  if(net==="auth"){st.className="st warn";st.textContent="Вход устарел — войдите снова";return}
+  if(net==="err"){st.className="st warn";st.textContent=loginErr+" — записи сохранены на устройстве";return}
   if(net==="off"){st.className="st warn";st.textContent="Нет связи — всё сохранено на устройстве, отправлю позже";return}
   if(busy||dirty){st.className="st";st.textContent="Сохраняю…";return}
   st.className="st ok";st.textContent="Синхронизировано";
@@ -226,9 +227,9 @@ async function sync(){
   busy=true;again=false;status();
   const sent=JSON.stringify({cur:S.cur,curU:S.curU,items:S.items});
   try{
-    const r=await fetch(CONFIG.API_URL,{method:"PUT",headers:{"Authorization":"OAuth "+token,"Content-Type":"application/json"},body:sent});
+    const r=await fetch(CONFIG.API_URL,{method:"PUT",headers:{"X-Budget-Token":token,"Content-Type":"application/json"},body:sent});
     if(r.status===401){token=null;ls.del(TKEY);net="auth";busy=false;status();$("login").hidden=false;return}
-    if(!r.ok)throw new Error(r.status);
+    if(!r.ok){net="err";loginErr="Сервер ответил ошибкой "+r.status;busy=false;status();return}
     const srv=await r.json();
     S=merge(S,{cur:srv.cur,curU:srv.curU,items:srv.items.map(i=>Object.assign(i,{id:String(i.id)}))});
     ls.set(KEY,JSON.stringify(S));
