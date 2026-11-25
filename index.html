@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Доходы и расходы</title>
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src https://functions.yandexcloud.net https://functions.yandexcloud.kz https://*.apigw.yandexcloud.net https://*.apigw.yandexcloud.kz; form-action 'none'">
 <style>
 /* VOICE: calm, exact money tool — the number first, nothing decorative
    IDEA: a precision gauge — income is the full scale, spending is the pointer
@@ -62,6 +62,11 @@ label{display:grid;gap:4px;font-size:14px;color:var(--mute)}
 .toast button{min-height:36px;background:var(--acc);color:#fff;border:0}
 .sync{font-size:13px;color:var(--mute)}
 [hidden]{display:none!important}
+.acct{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin-top:14px;font-size:14px;color:var(--mute)}
+.acct button{min-height:40px;font-size:15px}
+.ya{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.st::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--mute);vertical-align:1px}
+.st.ok::before{background:var(--pos)}.st.warn::before{background:var(--acc)}
 @media(max-width:700px){.grid{grid-template-columns:minmax(0,1fr)}.readout{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.readout>div:first-child{grid-column:1/-1}}
 @media(prefers-reduced-motion:reduce){.scale i{transition:none}}
 </style>
@@ -81,6 +86,11 @@ label{display:grid;gap:4px;font-size:14px;color:var(--mute)}
       </select>
     </div>
   </header>
+  <div class="acct">
+    <span class="st" id="st">Записи хранятся только на этом устройстве</span>
+    <button type="button" class="ya" id="login" hidden>Войти с Яндекс ID</button>
+    <button type="button" id="logout" hidden>Выйти</button>
+  </div>
 
   <section class="gauge" aria-label="Итог месяца">
     <div class="readout">
@@ -120,13 +130,19 @@ label{display:grid;gap:4px;font-size:14px;color:var(--mute)}
   <section class="card list">
     <h2>Все записи за месяц</h2>
     <ul id="ul"></ul>
-    <div class="sync" id="sync">Данные хранятся в этом браузере</div>
   </section>
 </div>
 <div class="toast" id="toast"><span>Запись удалена</span><button type="button" id="undo">Вернуть</button></div>
 
 <script>
 {
+// ===== НАСТРОЙКИ: впишите сюда два значения из инструкции =====
+const CONFIG={
+  CLIENT_ID:"fa0f1e6da6b746df97d4db0943434b3f",   // ClientID приложения с oauth.yandex.ru
+  API_URL:"https://functions.yandexcloud.net/d4ealgh7lbbgafv49em1"      // адрес облачной функции, например https://functions.yandexcloud.net/d4e...
+};
+// ===============================================================
+
 const CATS={
   out:[["Еда и продукты","#ff4f00"],["Жильё и коммуналка","#2f6fd6"],["Транспорт","#8a5cf0"],["Кафе и рестораны","#e0a100"],["Здоровье","#d63a6f"],["Одежда","#1f9e9a"],["Развлечения","#6aa52a"],["Связь и подписки","#7a7f88"]],
   in:[["Зарплата","#0f8a50"],["Подработка","#3fae74"],["Подарки","#7ccf9f"]]
@@ -136,26 +152,99 @@ const color=(t,c)=>{const f=CATS[t].find(x=>x[0]===c);if(f)return f[1];let h=0;f
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const today=()=>{const d=new Date();d.setMinutes(d.getMinutes()-d.getTimezoneOffset());return d.toISOString().slice(0,10)};
-const KEY="budget-v1";
-let S={cur:"₽",items:[]};
-try{const raw=localStorage.getItem(KEY);if(raw)S=Object.assign(S,JSON.parse(raw))}catch(e){}
-let type="out",lastDel=null,ref=null,toastT=null;
+const ls={get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}},del:k=>{try{localStorage.removeItem(k)}catch(e){}}};
+const KEY="budget-v1",TKEY="budget-token",DKEY="budget-dirty";
+const ONLINE=!!(CONFIG.CLIENT_ID&&CONFIG.API_URL);
+
+// ---------- данные ----------
+let S={cur:"₽",curU:0,items:[]};
+try{const raw=ls.get(KEY);if(raw)S=Object.assign(S,JSON.parse(raw))}catch(e){}
+// старые записи (до синхронизации) получают время изменения и строковый id
+S.items=S.items.map(i=>Object.assign({},i,{id:String(i.id),u:i.u||Number(i.id)||Date.now(),del:!!i.del}));
+const live=()=>S.items.filter(i=>!i.del);
+
+function merge(a,b){
+  const m=new Map();
+  for(const i of [...a.items,...b.items]){const o=m.get(i.id);if(!o||i.u>o.u||(i.u===o.u&&i.del&&!o.del))m.set(i.id,i)}
+  const fromB=(b.curU||0)>(a.curU||0);
+  return {cur:fromB?b.cur:a.cur,curU:Math.max(a.curU||0,b.curU||0),items:[...m.values()]};
+}
+
+let type="out",lastDel=null,toastT=null;
+let token=ONLINE?ls.get(TKEY):null;
+let dirty=ls.get(DKEY)==="1",busy=false,again=false,timer=null;
 
 const fmt=n=>{const s=Math.abs(n).toLocaleString("ru-RU",{maximumFractionDigits:2});return (n<0?"−":"")+s+" "+S.cur};
 
 function save(){
-  try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}
-  if(ref){ref.set({cur:S.cur,items:S.items}).catch(()=>{$("sync").textContent="Не удалось сохранить в облако — данные остались в браузере"})}
+  ls.set(KEY,JSON.stringify(S));
+  if(token){dirty=true;ls.set(DKEY,"1");clearTimeout(timer);timer=setTimeout(sync,700);status()}
 }
 
+// ---------- вход через Яндекс ID ----------
+function login(){
+  const st=Math.random().toString(36).slice(2)+Date.now().toString(36);
+  try{sessionStorage.setItem("budget-state",st)}catch(e){}
+  const back=location.origin+location.pathname;
+  location.href="https://oauth.yandex.ru/authorize?response_type=token&client_id="+encodeURIComponent(CONFIG.CLIENT_ID)+"&redirect_uri="+encodeURIComponent(back)+"&state="+encodeURIComponent(st)+"&force_confirm=no";
+}
+function readLoginReturn(){
+  if(!location.hash.includes("access_token"))return;
+  const p=new URLSearchParams(location.hash.slice(1));
+  let st=null;try{st=sessionStorage.getItem("budget-state");sessionStorage.removeItem("budget-state")}catch(e){}
+  history.replaceState(null,"",location.pathname+location.search);
+  if(p.get("access_token")&&st&&p.get("state")===st){token=p.get("access_token");ls.set(TKEY,token);dirty=true;ls.set(DKEY,"1")}
+}
+let confirmOut=false;
+function logout(){
+  if(dirty&&!confirmOut){confirmOut=true;$("logout").textContent="Не всё отправлено. Всё равно выйти?";setTimeout(()=>{confirmOut=false;$("logout").textContent="Выйти"},5000);return}
+  token=null;ls.del(TKEY);ls.del(DKEY);ls.del(KEY);dirty=false;
+  S={cur:"₽",curU:0,items:[]};$("logout").textContent="Выйти";confirmOut=false;render();status();
+}
+
+// ---------- синхронизация ----------
+let net="idle";
+function status(){
+  const st=$("st");
+  $("login").hidden=!ONLINE||!!token;$("logout").hidden=!token;
+  if(!ONLINE){st.className="st";st.textContent="Записи хранятся только на этом устройстве";return}
+  if(!token){st.className="st warn";st.textContent="Войдите, чтобы записи были на всех ваших устройствах";return}
+  if(net==="auth"){st.className="st warn";st.textContent="Вход устарел — войдите снова";return}
+  if(net==="off"){st.className="st warn";st.textContent="Нет связи — всё сохранено на устройстве, отправлю позже";return}
+  if(busy||dirty){st.className="st";st.textContent="Сохраняю…";return}
+  st.className="st ok";st.textContent="Синхронизировано";
+}
+async function sync(){
+  if(!token)return;
+  if(busy){again=true;return}
+  busy=true;again=false;status();
+  const sent=JSON.stringify({cur:S.cur,curU:S.curU,items:S.items});
+  try{
+    const r=await fetch(CONFIG.API_URL,{method:"PUT",headers:{"Authorization":"OAuth "+token,"Content-Type":"application/json"},body:sent});
+    if(r.status===401){token=null;ls.del(TKEY);net="auth";busy=false;status();$("login").hidden=false;return}
+    if(!r.ok)throw new Error(r.status);
+    const srv=await r.json();
+    S=merge(S,{cur:srv.cur,curU:srv.curU,items:srv.items.map(i=>Object.assign(i,{id:String(i.id)}))});
+    ls.set(KEY,JSON.stringify(S));
+    net="ok";
+    if(!again){dirty=false;ls.del(DKEY)}
+    render();
+  }catch(e){net="off"}
+  busy=false;status();
+  if(again)sync();
+}
+addEventListener("online",()=>{if(token)sync()});
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&token)sync()});
+
+// ---------- интерфейс ----------
 function fillCats(sel){
   const base=CATS[type].map(c=>c[0]);
-  const mine=[...new Set(S.items.filter(i=>i.t===type&&!base.includes(i.cat)).map(i=>i.cat))];
+  const mine=[...new Set(live().filter(i=>i.t===type&&!base.includes(i.cat)).map(i=>i.cat))];
   $("cat").innerHTML=[...base,...mine].map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("")+`<option value="__own">Свой вариант…</option>`;
   if(sel)$("cat").value=sel;
   toggleOwn();
 }
-function toggleOwn(){const on=$("cat").value==="__own";$("ownL").hidden=!on;$("own").required=on;if(on)$("own").focus()}
+function toggleOwn(){const on=$("cat").value==="__own";$("ownL").hidden=!on;$("own").required=on}
 function setType(t){
   type=t;$("tOut").setAttribute("aria-pressed",t==="out");$("tIn").setAttribute("aria-pressed",t==="in");
   $("add").textContent=t==="out"?"Добавить расход":"Добавить доход";fillCats();
@@ -163,7 +252,7 @@ function setType(t){
 
 function render(){
   const m=$("month").value;
-  const its=S.items.filter(i=>i.date.slice(0,7)===m).sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
+  const its=live().filter(i=>i.date.slice(0,7)===m).sort((a,b)=>b.date.localeCompare(a.date)||b.u-a.u);
   const inc=its.filter(i=>i.t==="in").reduce((s,i)=>s+i.amt,0);
   const exp=its.filter(i=>i.t==="out").reduce((s,i)=>s+i.amt,0);
   const bal=inc-exp;
@@ -185,7 +274,7 @@ function render(){
 
   $("bars").innerHTML=cats.length?cats.map(([c,v])=>`<div class="bar"><div class="t"><span>${esc(c)}</span><b>${esc(fmt(v))} · ${Math.round(v/exp*100)}%</b></div><div class="tr"><i style="width:${v/cats[0][1]*100}%;background:${color("out",c)}"></i></div></div>`).join(""):`<div class="empty">Расходов за этот месяц пока нет.</div>`;
 
-  $("ul").innerHTML=its.length?its.map(i=>`<li><span class="dot" style="background:${color(i.t,i.cat)}"></span><div class="what"><div>${esc(i.cat)}${i.note?" — "+esc(i.note):""}</div><small>${esc(new Date(i.date+"T00:00").toLocaleDateString("ru-RU",{day:"numeric",month:"long"}))}</small></div><span class="amt" style="color:${i.t==="in"?"var(--pos)":"var(--ink)"}">${i.t==="in"?"+":"−"}${esc(fmt(i.amt))}</span><button class="del" data-id="${i.id}" aria-label="Удалить запись">×</button></li>`).join(""):`<li style="display:block"><div class="empty">Записей нет. Добавьте доход или расход выше.</div></li>`;
+  $("ul").innerHTML=its.length?its.map(i=>`<li><span class="dot" style="background:${color(i.t,i.cat)}"></span><div class="what"><div>${esc(i.cat)}${i.note?" — "+esc(i.note):""}</div><small>${esc(new Date(i.date+"T00:00").toLocaleDateString("ru-RU",{day:"numeric",month:"long"}))}</small></div><span class="amt" style="color:${i.t==="in"?"var(--pos)":"var(--ink)"}">${i.t==="in"?"+":"−"}${esc(fmt(i.amt))}</span><button class="del" data-id="${esc(i.id)}" aria-label="Удалить запись">×</button></li>`).join(""):`<li style="display:block"><div class="empty">Записей нет. Добавьте доход или расход выше.</div></li>`;
 }
 
 $("tOut").onclick=()=>setType("out");
@@ -197,42 +286,30 @@ $("f").addEventListener("submit",e=>{
   let cat=$("cat").value;
   if(cat==="__own"){cat=$("own").value.trim().slice(0,40);if(!cat){$("own").focus();return}}
   const date=$("date").value||today();
-  S.items.push({id:Date.now(),t:type,amt:Math.round(amt*100)/100,cat,note:$("nt").value.trim().slice(0,80),date});
+  const now=Date.now();
+  S.items.push({id:now.toString(36)+Math.random().toString(36).slice(2,6),t:type,amt:Math.round(amt*100)/100,cat,note:$("nt").value.trim().slice(0,80),date,u:now,del:false});
   $("amt").value="";$("nt").value="";$("own").value="";fillCats(cat);
   if(date.slice(0,7)!==$("month").value)$("month").value=date.slice(0,7);
   save();render();$("amt").focus();
 });
-$("cat").addEventListener("change",toggleOwn);
+$("cat").addEventListener("change",()=>{toggleOwn();if($("cat").value==="__own")$("own").focus()});
 $("amt").addEventListener("input",()=>$("amt").setCustomValidity(""));
 $("ul").addEventListener("click",e=>{
   const b=e.target.closest(".del");if(!b)return;
-  const idx=S.items.findIndex(i=>String(i.id)===b.dataset.id);if(idx<0)return;
-  lastDel=S.items.splice(idx,1)[0];save();render();
+  const it=S.items.find(i=>i.id===b.dataset.id&&!i.del);if(!it)return;
+  it.del=true;it.u=Date.now();lastDel=it;save();render();
   const t=$("toast");t.style.display="flex";clearTimeout(toastT);toastT=setTimeout(()=>t.style.display="none",6000);
 });
-$("undo").onclick=()=>{if(lastDel){S.items.push(lastDel);lastDel=null;save();render()}$("toast").style.display="none"};
+$("undo").onclick=()=>{if(lastDel){lastDel.del=false;lastDel.u=Date.now();lastDel=null;save();render()}$("toast").style.display="none"};
 $("month").onchange=render;
-$("cur").onchange=()=>{S.cur=$("cur").value;save();render()};
+$("cur").onchange=()=>{S.cur=$("cur").value;S.curU=Date.now();save();render()};
+$("login").onclick=login;
+$("logout").onclick=logout;
 
+if(ONLINE)readLoginReturn();
 $("month").value=today().slice(0,7);$("date").value=today();
-setType("out");render();
-
-(async()=>{
-  try{
-    const db=await claude.use("db"),user=await claude.use("user");
-    if(!db||!user)return;
-    const id=await user.id();if(!id)return;
-    ref=db.collection("data/users/"+id).doc("budget");
-    let first=true;
-    const off=ref.onSnapshot(snap=>{
-      const d=snap&&(typeof snap.data==="function"?snap.data():snap);
-      if(d&&Array.isArray(d.items)){S={cur:d.cur||"₽",items:d.items};try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}render()}
-      else if(first&&S.items.length){save()}
-      first=false;
-      $("sync").textContent="Данные сохраняются в вашем аккаунте и доступны с любого устройства";
-    },()=>{$("sync").textContent="Облако недоступно — данные хранятся в этом браузере"});
-  }catch(e){}
-})();
+setType("out");render();status();
+if(token)sync();
 }
 </script>
 </body>
